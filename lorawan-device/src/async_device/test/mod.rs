@@ -20,6 +20,8 @@ use util::{setup, setup_with_session};
 #[cfg(feature = "multicast")]
 mod multicast;
 
+mod certification;
+
 type Device =
     crate::async_device::Device<TestRadio, DefaultFactory, TestTimer, rand_core::OsRng, 512, 4>;
 

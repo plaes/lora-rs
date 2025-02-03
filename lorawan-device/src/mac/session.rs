@@ -99,6 +99,7 @@ impl Session {
         region: &mut region::Configuration,
         configuration: &mut super::Configuration,
         #[cfg(feature = "multicast")] multicast: &mut super::multicast::Multicast,
+        certification: &mut super::certification::Certification,
         rx: &mut RadioBuffer<N>,
         dl: &mut Vec<Downlink, D>,
         ignore_mac: bool,
@@ -156,6 +157,9 @@ impl Session {
                     if let (Some(fport), FRMPayload::Data(data)) =
                         (decrypted.f_port(), decrypted.frm_payload())
                     {
+                        if fport == 224 {
+                            return certification.handle_message(data).into();
+                        }
                         #[cfg(feature = "multicast")]
                         if multicast.is_remote_setup_port(fport) {
                             return multicast.handle_setup_message::<C>(data).into();
