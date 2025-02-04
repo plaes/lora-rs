@@ -1,5 +1,4 @@
 use super::*;
-use crate::mac::Response;
 use lorawan::certification::DutResetReqCreator;
 use lorawan::creator::DataPayloadCreator;
 
@@ -19,7 +18,7 @@ fn handle_dut_reset_req(_uplink: Option<Uplink>, _config: RfConfig, rx_buffer: &
     finished.len()
 }
 
-#[cfg(feature="class-c")]
+#[cfg(feature = "class-c")]
 #[tokio::test]
 async fn test_certification_class_c_response() {
     let (radio, _timer, mut async_device) = util::setup_with_session_class_c().await;
@@ -31,13 +30,7 @@ async fn test_certification_class_c_response() {
     });
 
     radio.handle_rxtx(handle_dut_reset_req).await;
+    let (device, _response) = task.await.unwrap();
 
-    let (_, response) = task.await.unwrap();
-
-    match response {
-        Ok(Response::Certification(mac::certification::Response::DutReset)) => (),
-        e => {
-            panic!("Unknown response: {:?}", e);
-        }
-    }
+    assert_eq!(device.device.dut_reset_called, true);
 }

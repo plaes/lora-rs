@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    async_device::{Device as AsyncDevice, DeviceHandler},
     radio::{RfConfig, RxQuality, TxConfig},
     region,
     test_util::*,
@@ -22,8 +23,24 @@ mod multicast;
 
 mod certification;
 
+pub struct TestDevice {
+    pub dut_reset_called: bool,
+}
+
+impl DeviceHandler for TestDevice {
+    fn reset_device(&mut self) {
+        self.dut_reset_called = true;
+    }
+}
+
+impl TestDevice {
+    fn new() -> Self {
+        Self { dut_reset_called: false }
+    }
+}
+
 type Device =
-    crate::async_device::Device<TestRadio, DefaultFactory, TestTimer, rand_core::OsRng, 512, 4>;
+    AsyncDevice<TestDevice, TestRadio, DefaultFactory, TestTimer, rand_core::OsRng, 512, 4>;
 
 #[tokio::test]
 async fn test_join_rx1() {
