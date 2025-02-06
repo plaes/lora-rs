@@ -35,7 +35,7 @@ impl Otaa {
         rng: &mut G,
         buf: &mut RadioBuffer<N>,
     ) -> u16 {
-        self.dev_nonce = DevNonce::from(rng.next_u32() as u16);
+        self.dev_nonce = u16::from(self.dev_nonce).wrapping_add(1).into();
         buf.clear();
         let mut phy = JoinRequestCreator::new(buf.as_mut()).unwrap();
         phy.set_app_eui(self.network_credentials.appeui)
