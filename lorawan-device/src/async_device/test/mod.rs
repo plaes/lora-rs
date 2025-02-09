@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    async_device::{Device as AsyncDevice, DeviceHandler},
     radio::{RfConfig, RxQuality, TxConfig},
     region,
     test_util::*,
@@ -17,18 +18,47 @@ use radio::TestRadio;
 mod util;
 pub(crate) use util::{setup, setup_with_session};
 
-#[cfg(feature = "certification")]
-mod certification;
-
 mod maccommands;
 
 #[cfg(feature = "class-c")]
 mod class_c;
 
+#[cfg(feature = "certification")]
+mod certification;
+
 #[cfg(feature = "multicast")]
 mod multicast;
 
-type Device = crate::async_device::Device<TestRadio, TestTimer, rand_core::OsRng, 512, 4>;
+pub struct TestDevice {
+    pub dut_join_called: bool,
+    pub dut_reset_called: bool,
+    pub override_period: Option<u16>,
+}
+
+impl DeviceHandler for TestDevice {}
+
+#[cfg(feature = "certification")]
+impl CertificationHandler for TestDevice {
+    fn override_periodicity(&mut self, seconds: Option<u16>) {
+        self.override_period = seconds;
+    }
+
+    fn reset_device(&mut self) {
+        self.dut_reset_called = true;
+    }
+
+    fn reset_mac(&mut self) {
+        self.dut_join_called = true;
+    }
+}
+
+impl TestDevice {
+    fn new() -> Self {
+        Self { override_period: None, dut_reset_called: false, dut_join_called: true }
+    }
+}
+
+type Device = AsyncDevice<TestDevice, TestRadio, TestTimer, rand_core::OsRng, 512, 4>;
 
 #[tokio::test]
 async fn test_join_rx1() {

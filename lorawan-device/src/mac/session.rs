@@ -16,9 +16,6 @@ use lorawan::{
     parser::{parse as lorawan_parse, *},
 };
 
-#[cfg(feature = "certification")]
-use super::DeviceEvent;
-
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -197,18 +194,16 @@ impl Session {
                     {
                         #[cfg(feature = "certification")]
                         if certification.fport(fport) {
-                            use crate::mac::certification::Response::*;
+                            use crate::mac::certification::{DeviceEvent, Response::*};
                             match certification
                                 .handle_message(data, self.fcnt_down.try_into().unwrap())
                             {
                                 AdrBitChange(adr) => {
                                     self.override_adr = adr;
                                 }
-                                DutJoinReq => {
-                                    return Response::DeviceHandler(DeviceEvent::ResetMac)
-                                }
+                                DutJoinReq => return Response::DeviceEvent(DeviceEvent::ResetMac),
                                 DutResetReq => {
-                                    return Response::DeviceHandler(DeviceEvent::ResetDevice)
+                                    return Response::DeviceEvent(DeviceEvent::ResetDevice)
                                 }
                                 LinkCheckReq => {
                                     return Response::LinkCheckReq;
@@ -220,7 +215,7 @@ impl Session {
                                     }
                                 }
                                 TxPeriodicityChange(periodicity) => {
-                                    return Response::DeviceHandler(
+                                    return Response::DeviceEvent(
                                         DeviceEvent::TxPeriodicityChange { periodicity },
                                     )
                                 }

@@ -389,18 +389,9 @@ pub(crate) enum Response {
     #[cfg(feature = "certification")]
     UplinkPrepared,
     #[cfg(feature = "certification")]
-    DeviceHandler(DeviceEvent),
+    DeviceEvent(certification::DeviceEvent),
     #[cfg(feature = "multicast")]
     Multicast(multicast::Response),
-}
-
-#[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
-#[derive(Debug)]
-#[cfg(feature = "certification")]
-pub(crate) enum DeviceEvent {
-    ResetDevice,
-    ResetMac,
-    TxPeriodicityChange { periodicity: Option<u16> },
 }
 
 impl From<Response> for nb_device::Response {
@@ -417,7 +408,7 @@ impl From<Response> for nb_device::Response {
             #[cfg(feature = "certification")]
             Response::UplinkPrepared => unimplemented!(),
             #[cfg(feature = "certification")]
-            Response::DeviceHandler(_) => unimplemented!(),
+            Response::DeviceEvent(_) => unimplemented!(),
             #[cfg(feature = "multicast")]
             Response::Multicast(_) => unimplemented!(),
         }

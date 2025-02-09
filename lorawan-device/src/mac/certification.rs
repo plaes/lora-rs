@@ -18,6 +18,15 @@ pub(crate) enum Response {
     UplinkPrepared,
 }
 
+#[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
+#[derive(Debug)]
+#[cfg(feature = "certification")]
+pub(crate) enum DeviceEvent {
+    ResetDevice,
+    ResetMac,
+    TxPeriodicityChange { periodicity: Option<u16> },
+}
+
 pub(crate) struct Certification {
     pending_uplink: Option<heapless::Vec<u8, 256>>,
 }
