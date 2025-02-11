@@ -314,7 +314,8 @@ pub fn derive_command_handler(input: proc_macro::TokenStream) -> proc_macro::Tok
                     let data = &self.data[self.index..];
                     #( #impl_iter_next )*
                     {
-                        None
+                        panic!("Still some data left: {:?}", data);
+                        //None
                     }
                 } else {
                     None
