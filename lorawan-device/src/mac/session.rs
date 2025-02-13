@@ -471,7 +471,7 @@ impl Session {
                     self.uplink.add_mac_command(RXTimingSetupAnsCreator::new());
                 }
                 c => {
-                    println!("Unhandled mac command: {:?}", c);
+                    panic!("Unhandled mac command: {:?}", c);
                 }
             }
         }
