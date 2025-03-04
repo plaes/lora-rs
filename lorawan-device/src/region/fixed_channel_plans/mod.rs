@@ -211,4 +211,9 @@ impl<F: FixedChannelRegion> RegionHandler for FixedChannelPlan<F> {
     fn get_rx_datarate(&self, tx_datarate: DR, frame: &Frame, window: &Window) -> Datarate {
         F::get_rx_datarate(tx_datarate, frame, window)
     }
+
+    // NewChannelReq MAC command is not implemented in fixed channel regions
+    fn skip_newchannelreq(&self) -> bool {
+        true
+    }
 }

@@ -119,7 +119,7 @@ impl<const NUM_JOIN_CHANNELS: usize, R: DynamicChannelRegion<NUM_JOIN_CHANNELS>>
                 }
             }
             Some(CfList::FixedChannel(_cf_list)) => {
-                //TODO: dynamic channel plans have corresponding fixed channel lists,
+                // TODO: dynamic channel plans have corresponding fixed channel lists,
                 // however, this feature is entirely optional
             }
             None => {}
@@ -212,5 +212,10 @@ impl<const NUM_JOIN_CHANNELS: usize, R: DynamicChannelRegion<NUM_JOIN_CHANNELS>>
             Window::_2 => self.rx2_dr,
         };
         R::datarates()[datarate].clone().unwrap()
+    }
+
+    // NewChannelReq MAC command is required in dynamic channel regions
+    fn skip_newchannelreq(&self) -> bool {
+        false
     }
 }
