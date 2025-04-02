@@ -48,6 +48,8 @@ impl Certification {
                         return Response::TxPeriodicityChange(periodicity);
                     }
                 }
+                // TBD
+                RegionalDutyCycleCtrlReq(..) => {}
                 // Responses with uplink
                 LinkCheckReq(..) => return Response::LinkCheckReq,
                 DutVersionsReq(..) => {
