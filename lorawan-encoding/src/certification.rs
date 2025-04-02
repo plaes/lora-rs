@@ -22,6 +22,9 @@ pub enum DownlinkDUTCommand<'a> {
     #[cmd(cid = 0x04, len = 1)]
     AdrBitChangeReq(AdrBitChangeReqPayload<'a>),
 
+    #[cmd(cid = 0x05, len = 1)]
+    RegionalDutyCycleCtrlReq(RegionalDutyCycleCtrlReqPayload<'a>),
+
     /// Change uplink periodicity to the provided value
     #[cmd(cid = 0x06, len = 1)]
     TxPeriodicityChangeReq(TxPeriodicityChangeReqPayload<'a>),
