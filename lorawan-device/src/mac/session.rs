@@ -443,20 +443,20 @@ impl Session {
                     let freq = payload.frequency().value();
                     let freq_ack = region.frequency_valid(freq);
 
-                    // TODO: Figure these out...
-                    // let dl = payload.dl_settings();
-                    // - rx1_dr_offset: dl.rx1_dr_offset()
-                    // - rx2_data_rate = dl.rx2_data_rate());
-                    if freq_ack {
+                    // TODO:
+                    let dl = payload.dl_settings();
+                    // - rx1_dr_offset = dl.rx1_dr_offset();
+                    let rx2_data_rate = dl.rx2_data_rate();
+                    let rx2_dr_ack = region.get_datarate(rx2_data_rate).is_some();
+
+                    if freq_ack && rx2_dr_ack {
+                        configuration.rx2_data_rate = Some(rx2_data_rate);
                         configuration.rx2_frequency = Some(freq);
                     }
 
-                    // RXParamSetupReq has its own acknowledgment mechanism, requiring
-                    // RXParamSetupAns with all uplinks until a Class A downlink is received
-                    // by the end-device.
                     let mut cmd = RXParamSetupAnsCreator::new();
                     cmd.set_rx1_data_rate_offset_ack(true)
-                        .set_rx2_data_rate_ack(true)
+                        .set_rx2_data_rate_ack(rx2_dr_ack)
                         .set_channel_ack(freq_ack);
 
                     self.uplink.add_mac_command(cmd);
