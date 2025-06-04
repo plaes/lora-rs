@@ -433,8 +433,8 @@ impl Configuration {
         region_dispatch!(self, channel_mask_validate, channel_mask, dr)
     }
 
-    pub(crate) fn get_rx_datarate(&self, tx_datarate: DR, window: &Window) -> Datarate {
-        region_dispatch!(self, get_rx_datarate, tx_datarate, window)
+    pub(crate) fn get_rx_dr(&self, tx_datarate: DR, window: &Window) -> DR {
+        region_dispatch!(self, get_rx_dr, tx_datarate, window)
     }
 
     pub(crate) fn get_rx_frequency(&self, frame: &Frame, window: &Window) -> u32 {
@@ -545,8 +545,8 @@ pub(crate) trait RegionHandler {
         frame: &Frame,
     ) -> (Datarate, u32);
 
+    fn get_rx_dr(&self, datarate: DR, window: &Window) -> DR;
     fn get_rx_frequency(&self, frame: &Frame, window: &Window) -> u32;
-    fn get_rx_datarate(&self, datarate: DR, window: &Window) -> Datarate;
     fn get_coding_rate(&self) -> CodingRate {
         DEFAULT_CODING_RATE
     }
