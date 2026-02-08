@@ -55,7 +55,6 @@ macro_rules! fixed_len_struct {
         #[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
         pub struct $type<T: AsRef<[u8]>>(T);
 
-
         impl<T: AsRef<[u8]>> $type<T> {
             pub const fn byte_len() -> usize {
                 $size
@@ -123,7 +122,6 @@ macro_rules! fixed_len_struct {
                 $type(T::default())
             }
         }
-
     };
 }
 
@@ -185,6 +183,19 @@ macro_rules! fixed_len_arr {
                 Self(v.into())
             }
         }
+
+        #[cfg(feature = "defmt-03")]
+        impl defmt::Format for $name {
+            fn format(&self, fmt: defmt::Formatter<'_>) {
+                defmt::write!(fmt, "{}(", stringify!($name));
+                for (i, b) in self.0.as_slice().iter().enumerate() {
+                    if i > 0 { defmt::write!(fmt, " "); }
+                    defmt::write!(fmt, "{:02x}", b);
+                }
+                defmt::write!(fmt, ")");
+            }
+        }
+
     };
 }
 
