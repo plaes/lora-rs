@@ -91,12 +91,12 @@ impl<D: AsMut<[u8]>> JoinAcceptCreator<D> {
     ///
     /// * app_nonce - instance of lorawan::parser::AppNonce or anything that can be converted into
     ///   it.
-    pub fn set_app_nonce<H: AsRef<[u8]>, T: Into<parser::AppNonce<H>>>(
+    pub fn set_app_nonce<T: Into<parser::AppNonce>>(
         &mut self,
         app_nonce: T,
     ) -> &mut Self {
         let converted = app_nonce.into();
-        self.data.as_mut()[1..4].copy_from_slice(converted.as_ref());
+        self.data.as_mut()[1..4].copy_from_slice(converted.as_array());
 
         self
     }

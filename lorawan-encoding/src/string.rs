@@ -97,10 +97,9 @@ fixed_len_struct_impl_to_string_msb! {
 //fixed_len_struct_impl_to_string_msb! {
 //    DevNonce[2];
 //}
-
-fixed_len_struct_impl_to_string_msb! {
-    AppNonce[3];
-}
+//fixed_len_struct_impl_to_string_msb! {
+//    AppNonce[3];
+//}
 
 fixed_len_struct_impl_to_string_msb! {
     DevAddr[4];

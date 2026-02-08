@@ -28,7 +28,7 @@ use super::securityhelpers;
 
 use super::packet_length::phy::{join::*, mac::FPORT_LEN, MHDR_LEN, MIC_LEN, PHY_PAYLOAD_MIN_LEN};
 
-use hybrid_array::{sizes::U2, Array, ArraySize};
+use hybrid_array::{sizes::{U2, U3}, Array, ArraySize};
 
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
@@ -571,17 +571,17 @@ impl<T: AsRef<[u8]>> DecryptedJoinAcceptPayload<T> {
         crypto: &C,
     ) -> AES128 {
         let cipher = crypto.new_enc(key);
+        let app_nonce = self.app_nonce();
+
+        let nwk_addr = self.net_id();
+        let nwk_addr_arr = nwk_addr.as_ref();
 
         // note: AppNonce is 24 bits, NetId is 24 bits, DevNonce is 16 bits
-        let app_nonce = self.app_nonce();
-        let nwk_addr = self.net_id();
-        let (app_nonce_arr, nwk_addr_arr) = (app_nonce.as_ref(), nwk_addr.as_ref());
-
         let mut block = [0u8; 16];
         block[0] = first_byte;
-        block[1] = app_nonce_arr[0];
-        block[2] = app_nonce_arr[1];
-        block[3] = app_nonce_arr[2];
+        block[1] = app_nonce.0[0];
+        block[2] = app_nonce.0[1];
+        block[3] = app_nonce.0[2];
         block[4] = nwk_addr_arr[0];
         block[5] = nwk_addr_arr[1];
         block[6] = nwk_addr_arr[2];
@@ -601,7 +601,7 @@ pub enum CfList<'a> {
 
 impl<T: AsRef<[u8]>> DecryptedJoinAcceptPayload<T> {
     /// Gives the app nonce of the JoinAccept.
-    pub fn app_nonce(&self) -> AppNonce<&[u8]> {
+    pub fn app_nonce(&self) -> AppNonce {
         const OFFSET: usize = MHDR_LEN;
         const END: usize = OFFSET + JOIN_NONCE_LEN;
         AppNonce::new_from_raw(&self.0.as_ref()[OFFSET..END])
@@ -1056,10 +1056,10 @@ impl From<u16> for DevNonce {
     }
 }
 
-fixed_len_struct! {
+fixed_len_arr!(
     /// AppNonce represents a 24-bit network server nonce.
-    struct AppNonce[3];
-}
+    AppNonce, U3, 3
+);
 
 fixed_len_struct! {
     /// DevAddr represents a 32-bit device address.
