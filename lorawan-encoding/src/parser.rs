@@ -28,6 +28,8 @@ use super::securityhelpers;
 
 use super::packet_length::phy::{join::*, mac::FPORT_LEN, MHDR_LEN, MIC_LEN, PHY_PAYLOAD_MIN_LEN};
 
+use hybrid_array::{sizes::U2, Array, ArraySize};
+
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
 pub enum Error {
@@ -119,6 +121,67 @@ macro_rules! fixed_len_struct {
             }
         }
 
+    };
+}
+
+/// Trait for types that wrap a fixed-length array
+pub trait FixedLen: Sized + Copy + Clone {
+    type Size: ArraySize;
+
+    /// Create instance from a slice, returning None if length doesn't match
+    fn new(data: &[u8]) -> Option<Self>;
+
+    /// Create from a raw slice (panics if length doesn't match)
+    fn new_from_raw(data: &[u8]) -> Self;
+}
+
+macro_rules! fixed_len_arr {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $size:ty, $len: expr
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        pub struct $name(Array<u8, $size>);
+
+        impl FixedLen for $name {
+            type Size = $size;
+
+            fn new(data: &[u8]) -> Option<Self> {
+                if data.len() != $len {
+                    None
+                } else {
+                    Array::try_from(data).ok().map(Self)
+                }
+            }
+
+            fn new_from_raw(data: &[u8]) -> Self {
+                Self(Array::try_from(data).unwrap())
+            }
+        }
+
+        impl $name {
+            pub fn as_array(&self) -> &Array<u8, $size> {
+                &self.0
+            }
+        }
+
+        impl<const N: usize> From<&[u8; N]> for $name
+        where
+            $size: ArraySize,
+            Array<u8, $size>: From<[u8; N]>,
+        {
+            fn from(v: &[u8; N]) -> Self {
+                Self((*v).into())
+            }
+        }
+
+        impl From<[u8; $len]> for $name {
+            fn from(v: [u8; $len]) -> Self {
+                Self(v.into())
+            }
+        }
     };
 }
 
@@ -430,6 +493,7 @@ impl<T: AsRef<[u8]>> DecryptedJoinAcceptPayload<T> {
     /// # Examples
     ///
     /// ```
+    /// use crate::lorawan::parser::FixedLen;
     /// let dev_nonce = vec![0xcc, 0xdd];
     /// let data = vec![
     ///     0x20, 0x49, 0x3e, 0xeb, 0x51, 0xfb, 0xa2, 0x11, 0x6f, 0x81, 0x0e, 0xdb, 0x37, 0x42, 0x97,
@@ -475,6 +539,7 @@ impl<T: AsRef<[u8]>> DecryptedJoinAcceptPayload<T> {
     /// # Examples
     ///
     /// ```
+    /// use crate::lorawan::parser::FixedLen;
     /// let dev_nonce = vec![0xcc, 0xdd];
     /// let data = vec![
     ///     0x20, 0x49, 0x3e, 0xeb, 0x51, 0xfb, 0xa2, 0x11, 0x6f, 0x81, 0x0e, 0xdb, 0x37, 0x42, 0x97,
@@ -974,37 +1039,10 @@ fixed_len_struct! {
     struct EUI64[8];
 }
 
-/*
-fixed_len_struct! {
-    /// DevNonce represents a 16-bit device nonce.
-    struct DevNonce[2];
-}
-*/
-
-use hybrid_array::{sizes::U2, Array};
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-//#[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
-pub struct DevNonce(Array<u8, U2>);
-
-impl DevNonce {
-    pub fn new(data: &[u8]) -> Option<Self> {
-        if data.len() != 2 {
-            None
-        } else {
-            Some(Self(Array::try_from(data).unwrap()))
-        }
-    }
-
-    pub fn new_from_raw(v: &[u8]) -> Self {
-        Self(Array::try_from(v).unwrap())
-    }
-
-    pub fn as_ref(&self) -> Array<u8, U2> {
-        self.0
-    }
-}
+fixed_len_arr!(
+    /// DevNonce is a 2-byte counter preventing replay attacks during the join process.
+    DevNonce, U2, 2
+);
 
 impl From<DevNonce> for u16 {
     fn from(v: DevNonce) -> Self {
@@ -1015,18 +1053,6 @@ impl From<DevNonce> for u16 {
 impl From<u16> for DevNonce {
     fn from(v: u16) -> Self {
         Self(Array(v.to_be_bytes()))
-    }
-}
-
-impl From<[u8; 2]> for DevNonce {
-    fn from(v: [u8; 2]) -> Self {
-        Self(Array(v))
-    }
-}
-
-impl From<&[u8; 2]> for DevNonce {
-    fn from(v: &[u8; 2]) -> Self {
-        Self(Array(*v))
     }
 }
 
