@@ -52,7 +52,7 @@ pub fn get_key() -> [u8; 16] {
     [0; 16]
 }
 
-pub fn get_dev_addr() -> DevAddr<[u8; 4]> {
+pub fn get_dev_addr() -> DevAddr {
     DevAddr::from(0)
 }
 pub fn get_otaa_credentials() -> JoinMode {

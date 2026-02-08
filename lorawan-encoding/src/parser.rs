@@ -28,7 +28,10 @@ use super::securityhelpers;
 
 use super::packet_length::phy::{join::*, mac::FPORT_LEN, MHDR_LEN, MIC_LEN, PHY_PAYLOAD_MIN_LEN};
 
-use hybrid_array::{sizes::{U2, U3}, Array, ArraySize};
+use hybrid_array::{
+    sizes::{U2, U3, U4},
+    Array, ArraySize,
+};
 
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt-03", derive(defmt::Format))]
@@ -141,7 +144,7 @@ macro_rules! fixed_len_arr {
         $name:ident, $size:ty, $len: expr
     ) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, PartialEq)]
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
         pub struct $name(Array<u8, $size>);
 
@@ -615,7 +618,7 @@ impl<T: AsRef<[u8]>> DecryptedJoinAcceptPayload<T> {
     }
 
     /// Gives the dev address of the JoinAccept.
-    pub fn dev_addr(&self) -> DevAddr<&[u8]> {
+    pub fn dev_addr(&self) -> DevAddr {
         const OFFSET: usize = MHDR_LEN + JOIN_NONCE_LEN + NET_ID_LEN;
         const END: usize = OFFSET + DEV_ADDR_LEN;
         DevAddr::new_from_raw(&self.0.as_ref()[OFFSET..END])
@@ -1061,28 +1064,26 @@ fixed_len_arr!(
     AppNonce, U3, 3
 );
 
-fixed_len_struct! {
+fixed_len_arr!(
     /// DevAddr represents a 32-bit device address.
-    struct DevAddr[4];
-}
+    DevAddr, U4, 4
+);
 
-#[allow(clippy::should_implement_trait)]
-impl<T: AsRef<[u8]>> DevAddr<T> {
+/*
+impl DevAddr {
     pub fn nwk_id(&self) -> u8 {
-        self.0.as_ref()[0] >> 1
+        self.0.as_array()[0] >> 1
     }
-    pub fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
+}
+*/
+
+impl From<DevAddr> for u32 {
+    fn from(v: DevAddr) -> Self {
+        u32::from_be_bytes(v.0.into())
     }
 }
 
-impl From<DevAddr<[u8; 4]>> for u32 {
-    fn from(v: DevAddr<[u8; 4]>) -> Self {
-        u32::from_be_bytes(v.0)
-    }
-}
-
-impl From<u32> for DevAddr<[u8; 4]> {
+impl From<u32> for DevAddr {
     fn from(v: u32) -> Self {
         Self::from(v.to_be_bytes())
     }
@@ -1105,9 +1106,9 @@ impl From<u32> for McAddr<[u8; 4]> {
     }
 }
 
-impl From<DevAddr<[u8; 4]>> for McAddr<[u8; 4]> {
-    fn from(v: DevAddr<[u8; 4]>) -> Self {
-        McAddr(v.0)
+impl From<DevAddr> for McAddr<[u8; 4]> {
+    fn from(v: DevAddr) -> Self {
+        McAddr(v.0.into())
     }
 }
 
@@ -1137,7 +1138,7 @@ impl<'a> FHDR<'a> {
     }
 
     /// Gives the device address associated with the given payload.
-    pub fn dev_addr(&self) -> DevAddr<&'a [u8]> {
+    pub fn dev_addr(&self) -> DevAddr {
         DevAddr::new_from_raw(&self.0[0..4])
     }
 
