@@ -104,7 +104,7 @@ where
     /// This function is not safe to drop or cancel, as it calls `process_irq_event`, which must run to completion to avoid radio lockups.
     /// Do not call this function within a select branch or in any context where it may be prematurely canceled.
     pub async fn process_irq_event(&mut self) -> Result<Option<IrqState>, RadioError> {
-        self.radio_kind.process_irq_event(self.radio_mode, None, false).await
+        self.radio_kind.process_irq_event(self.radio_mode, false).await
     }
 
     /// Create modulation parameters for a communication channel
@@ -237,10 +237,14 @@ where
             self.radio_kind.do_tx().await?;
             loop {
                 self.wait_for_irq().await?;
-                match self.radio_kind.process_irq_event(self.radio_mode, None, true).await {
+                match self.radio_kind.process_irq_event(self.radio_mode, true).await {
                     Ok(Some(IrqState::Done | IrqState::PreambleReceived)) => {
                         self.radio_mode = RadioMode::Standby;
                         return Ok(());
+                    }
+                    Ok(Some(IrqState::CadDetected)) => {
+                        defmt::debug!("CAD Detection is not implemented!");
+                        continue;
                     }
                     Ok(None) => continue,
                     Err(err) => {
@@ -296,9 +300,9 @@ where
     ) -> Result<(u8, PacketStatus), RadioError> {
         if let RadioMode::Receive(_) = self.radio_mode {
             loop {
-                match self.radio_kind.process_irq_event(self.radio_mode, None, true).await {
+                match self.radio_kind.process_irq_event(self.radio_mode, true).await {
                     Ok(Some(actual_state)) => match actual_state {
-                        IrqState::PreambleReceived => (),
+                        IrqState::CadDetected | IrqState::PreambleReceived => (),
                         IrqState::Done => {
                             let received_len = self.radio_kind.get_rx_payload(packet_params, receiving_buffer).await?;
                             let rx_pkt_status = self.radio_kind.get_rx_packet_status().await?;
@@ -325,7 +329,7 @@ where
 
     /// Returns the current IRQ state
     pub async fn get_irq_state(&mut self) -> Result<Option<IrqState>, RadioError> {
-        self.radio_kind.get_irq_state(self.radio_mode, None).await
+        self.radio_kind.get_irq_state(self.radio_mode).await
     }
 
     /// Clears the IRQ status
@@ -406,13 +410,9 @@ where
         if self.radio_mode == RadioMode::ChannelActivityDetection {
             self.radio_kind.do_cad(mdltn_params).await?;
             self.wait_for_irq().await?;
-            let mut cad_activity_detected = false;
-            match self
-                .radio_kind
-                .process_irq_event(self.radio_mode, Some(&mut cad_activity_detected), true)
-                .await
-            {
-                Ok(Some(IrqState::Done)) => Ok(cad_activity_detected),
+            match self.radio_kind.process_irq_event(self.radio_mode, true).await {
+                Ok(Some(IrqState::CadDetected)) => Ok(true),
+                Ok(Some(IrqState::Done)) => Ok(false),
                 Err(err) => {
                     self.radio_kind.ensure_ready(self.radio_mode).await?;
                     self.radio_kind.set_standby().await?;

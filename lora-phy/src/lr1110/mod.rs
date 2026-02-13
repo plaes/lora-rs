@@ -1845,11 +1845,7 @@ where
         self.intf.iv.await_irq().await
     }
 
-    async fn get_irq_state(
-        &mut self,
-        radio_mode: RadioMode,
-        cad_activity_detected: Option<&mut bool>,
-    ) -> Result<Option<IrqState>, RadioError> {
+    async fn get_irq_state(&mut self, radio_mode: RadioMode) -> Result<Option<IrqState>, RadioError> {
         // Read IRQ status from the LR1110
         let irq_flags = self.get_irq_flags().await?;
 
@@ -1888,8 +1884,8 @@ where
             }
             RadioMode::ChannelActivityDetection => {
                 if IrqMask::CadDone.is_set(irq_flags) {
-                    if let Some(detected) = cad_activity_detected {
-                        *detected = IrqMask::CadDetected.is_set(irq_flags);
+                    if IrqMask::CadDetected.is_set(irq_flags) {
+                        return Ok(Some(IrqState::CadDetected));
                     }
                     return Ok(Some(IrqState::Done));
                 }
@@ -1915,10 +1911,9 @@ where
     async fn process_irq_event(
         &mut self,
         radio_mode: RadioMode,
-        cad_activity_detected: Option<&mut bool>,
         clear_interrupts: bool,
     ) -> Result<Option<IrqState>, RadioError> {
-        let irq_state = self.get_irq_state(radio_mode, cad_activity_detected).await;
+        let irq_state = self.get_irq_state(radio_mode).await;
 
         if clear_interrupts {
             self.clear_irq_status().await?;

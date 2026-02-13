@@ -25,6 +25,9 @@ pub trait InterfaceVariant {
 pub enum IrqState {
     /// Runs the loop until after the preamble has been received
     PreambleReceived,
+    /// Runs the loop until Channel Activity is Detected (or timeout occurs)
+    // TODO: Merge PreambleReceived + CadDetected into `Event`
+    CadDetected,
     /// Runs the loop until the operation is fully complete
     Done,
 }
@@ -111,16 +114,11 @@ pub trait RadioKind {
     async fn process_irq_event(
         &mut self,
         radio_mode: RadioMode,
-        cad_activity_detected: Option<&mut bool>,
         clear_interrupts: bool,
     ) -> Result<Option<IrqState>, RadioError>;
 
     /// Get IRQ state
-    async fn get_irq_state(
-        &mut self,
-        radio_mode: RadioMode,
-        cad_activity_detected: Option<&mut bool>,
-    ) -> Result<Option<IrqState>, RadioError>;
+    async fn get_irq_state(&mut self, radio_mode: RadioMode) -> Result<Option<IrqState>, RadioError>;
     /// Clear IRQ status
     async fn clear_irq_status(&mut self) -> Result<(), RadioError>;
 }
