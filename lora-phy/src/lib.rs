@@ -409,7 +409,7 @@ where
             let mut cad_activity_detected = false;
             match self
                 .radio_kind
-                .process_irq_event(self.radio_mode, Some(&mut cad_activity_detected), true)
+                .process_irq_event(self.radio_mode, Some(&mut cad_activity_detected), false)
                 .await
             {
                 Ok(Some(IrqState::Done)) => Ok(cad_activity_detected),
