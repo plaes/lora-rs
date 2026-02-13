@@ -930,14 +930,14 @@ where
                     return Err(RadioError::ReceiveTimeout);
                 }
                 if IrqMask::PreambleDetected.is_set(irq_flags) || IrqMask::HeaderValid.is_set(irq_flags) {
-                    return Ok(Some(IrqState::PreambleReceived));
+                    return Ok(Some(IrqState::Detect));
                 }
             }
             RadioMode::ChannelActivityDetection => {
+                if IrqMask::CADActivityDetected.is_set(irq_flags) {
+                    return Ok(Some(IrqState::Detect));
+                }
                 if IrqMask::CADDone.is_set(irq_flags) {
-                    if IrqMask::CADActivityDetected.is_set(irq_flags) {
-                        return Ok(Some(IrqState::CadDetected));
-                    }
                     return Ok(Some(IrqState::Done));
                 }
             }
