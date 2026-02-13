@@ -1879,14 +1879,14 @@ where
                     return Err(RadioError::ReceiveTimeout);
                 }
                 if IrqMask::PreambleDetected.is_set(irq_flags) || IrqMask::SyncWordHeaderValid.is_set(irq_flags) {
-                    return Ok(Some(IrqState::PreambleReceived));
+                    return Ok(Some(IrqState::Detect));
                 }
             }
             RadioMode::ChannelActivityDetection => {
+                if IrqMask::CadDetected.is_set(irq_flags) {
+                    return Ok(Some(IrqState::Detect));
+                }
                 if IrqMask::CadDone.is_set(irq_flags) {
-                    if IrqMask::CadDetected.is_set(irq_flags) {
-                        return Ok(Some(IrqState::CadDetected));
-                    }
                     return Ok(Some(IrqState::Done));
                 }
             }

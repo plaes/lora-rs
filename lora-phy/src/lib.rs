@@ -238,13 +238,10 @@ where
             loop {
                 self.wait_for_irq().await?;
                 match self.radio_kind.process_irq_event(self.radio_mode, true).await {
-                    Ok(Some(IrqState::Done | IrqState::PreambleReceived)) => {
+                    // In Tx mode we do not have "special" events
+                    Ok(Some(IrqState::Done | IrqState::Detect)) => {
                         self.radio_mode = RadioMode::Standby;
                         return Ok(());
-                    }
-                    Ok(Some(IrqState::CadDetected)) => {
-                        defmt::debug!("CAD Detection is not implemented!");
-                        continue;
                     }
                     Ok(None) => continue,
                     Err(err) => {
@@ -302,12 +299,13 @@ where
             loop {
                 match self.radio_kind.process_irq_event(self.radio_mode, true).await {
                     Ok(Some(actual_state)) => match actual_state {
-                        IrqState::CadDetected | IrqState::PreambleReceived => (),
                         IrqState::Done => {
                             let received_len = self.radio_kind.get_rx_payload(packet_params, receiving_buffer).await?;
                             let rx_pkt_status = self.radio_kind.get_rx_packet_status().await?;
                             return Ok((received_len, rx_pkt_status));
                         }
+                        // Preamble was received, wait for next IRQ
+                        IrqState::Detect => (),
                     },
                     Ok(None) => (),
                     Err(err) => {
@@ -411,7 +409,7 @@ where
             self.radio_kind.do_cad(mdltn_params).await?;
             self.wait_for_irq().await?;
             match self.radio_kind.process_irq_event(self.radio_mode, true).await {
-                Ok(Some(IrqState::CadDetected)) => Ok(true),
+                Ok(Some(IrqState::Detect)) => Ok(true),
                 Ok(Some(IrqState::Done)) => Ok(false),
                 Err(err) => {
                     self.radio_kind.ensure_ready(self.radio_mode).await?;

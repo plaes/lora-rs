@@ -23,11 +23,11 @@ pub trait InterfaceVariant {
 /// Specifies an IRQ processing state to run the loop to
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IrqState {
-    /// Runs the loop until after the preamble has been received
-    PreambleReceived,
-    /// Runs the loop until Channel Activity is Detected (or timeout occurs)
-    // TODO: Merge PreambleReceived + CadDetected into `Event`
-    CadDetected,
+    /// Runs until mode-specific event is detected.
+    /// Depending on Radio mode, it can be either:
+    /// * PreambleReceived in Rx mode
+    /// * CadDetected in CAD mode
+    Detect,
     /// Runs the loop until the operation is fully complete
     Done,
 }

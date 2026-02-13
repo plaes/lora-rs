@@ -532,15 +532,14 @@ where
                 }
                 if IrqMask::HeaderValid.is_set_in(irq_flags) {
                     debug!("HeaderValid in radio mode {}", radio_mode);
-                    return Ok(Some(IrqState::PreambleReceived));
+                    return Ok(Some(IrqState::Detect));
                 }
             }
             RadioMode::ChannelActivityDetection => {
+                if (irq_flags & IrqMask::CADActivityDetected.value()) == IrqMask::CADActivityDetected.value() {
+                    return Ok(Some(IrqState::Detect));
+                }
                 if (irq_flags & IrqMask::CADDone.value()) == IrqMask::CADDone.value() {
-                    debug!("CADDone in radio mode {}", radio_mode);
-                    if (irq_flags & IrqMask::CADActivityDetected.value()) == IrqMask::CADActivityDetected.value() {
-                        return Ok(Some(IrqState::CadDetected));
-                    }
                     return Ok(Some(IrqState::Done));
                 }
             }
