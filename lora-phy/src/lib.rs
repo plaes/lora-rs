@@ -411,13 +411,23 @@ where
             match self.radio_kind.process_irq_event(self.radio_mode, true).await {
                 Ok(Some(IrqState::Detect)) => Ok(true),
                 Ok(Some(IrqState::Done)) => Ok(false),
+                Ok(_) => {
+                    if cfg!(feature = "stm32-subghz-irq-quirk") {
+                        // STM32 subghz device triggers IRQ, but none of
+                        // expected IRQ fields are enabled.
+                        // Radio status flag in this case is 0xd2, signalling
+                        // that radio is still in RX mode.
+                        Ok(false)
+                    } else {
+                        unreachable!("Spurious IRQ detected!")
+                    }
+                }
                 Err(err) => {
                     self.radio_kind.ensure_ready(self.radio_mode).await?;
                     self.radio_kind.set_standby().await?;
                     self.radio_mode = RadioMode::Standby;
                     Err(err)
                 }
-                Ok(_) => unreachable!(),
             }
         } else {
             Err(RadioError::InvalidRadioMode)
