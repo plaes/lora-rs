@@ -14,14 +14,22 @@ use lorawan::maccommandcreator::{
     RXParamSetupAnsCreator, RXTimingSetupAnsCreator,
 };
 use lorawan::maccommands::DownlinkMacCommand;
-use lorawan::maccommands::{MacCommands, parse_downlink_mac_commands};
+use lorawan::maccommands::{
+    MacCommands, SerializableMacCommand, parse_downlink_mac_commands, parse_uplink_mac_commands,
+};
 use lorawan::parser::{
     DataFrameType, DecryptedDataPayload, DecryptedJoinAcceptPayload, DevAddr, EncryptedDataPayload,
     FrmPayload,
 };
 use lorawan::{
     default_crypto::DefaultCrypto,
-    packet_length::phy::{MHDR_LEN, MIC_LEN},
+    packet_length::phy::{
+        MHDR_LEN, MIC_LEN,
+        mac::{
+            FPORT_LEN,
+            fhdr::{FHDR_MIN_LEN, FOPTS_MAX_LEN},
+        },
+    },
     types::DR,
 };
 
@@ -54,6 +62,9 @@ pub struct Session {
     #[cfg(feature = "certification")]
     /// Applicative downlink frame counter
     pub rx_app_cnt: u16,
+    /// Whether the last prepared uplink dropped non-empty application data.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) app_payload_dropped: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +110,7 @@ impl Session {
             override_confirmed: None,
             #[cfg(feature = "certification")]
             rx_app_cnt: 0,
+            app_payload_dropped: false,
         }
     }
 
@@ -154,6 +166,15 @@ impl Session {
                     info!("Dropping oversized payload.");
                     return self.rx2_complete(configuration, region);
                 }
+            }
+
+            // MAC commands may not be in both FOpts and the FPort 0 FRMPayload.
+            // Drop these invalid frames without any processing.
+            if !encrypted_data.fhdr().f_opts().is_empty() && encrypted_data.f_port() == Some(0) {
+                debug!(
+                    "Dropping frame with MAC commands in both FOpts and the FPort 0 FRMPayload."
+                );
+                return Response::NoUpdate;
             }
 
             // If ignore_mac is false, we're dealing with Class A downlink and
@@ -238,7 +259,23 @@ impl Session {
                         #[cfg(feature = "certification")]
                         if certification.fport(fport) {
                             use crate::mac::certification::Response::*;
-                            match certification.handle_message(data, self.rx_app_cnt) {
+                            // The answer goes out as a regular uplink and carries
+                            // the MAC answers queued above in FOpts, so only
+                            // what the current DR leaves after the FHDR, FOpts
+                            // and FPort is available for it.
+                            let max_frm_payload_len = (region.get_max_payload_length(
+                                configuration.data_rate,
+                                false,
+                                false,
+                            ) as usize)
+                                .saturating_sub(
+                                    FHDR_MIN_LEN + self.uplink.mac_commands().len() + FPORT_LEN,
+                                );
+                            match certification.handle_message(
+                                data,
+                                self.rx_app_cnt,
+                                max_frm_payload_len,
+                            ) {
                                 AdrBitChange(adr) => {
                                     configuration.adr_enabled = adr;
                                 }
@@ -319,19 +356,25 @@ impl Session {
         if configuration.adr_enabled {
             self.adr_ack_cnt = self.adr_ack_cnt.saturating_add(1);
             // After ADR_ACK_LIMIT + N*ADR_ACK_DELAY uplinks without a downlink,
-            // step down the data rate to try to regain connectivity.
+            // raise TX power and then step down the data rate to try to regain
+            // connectivity.
             if self.adr_ack_cnt >= (ADR_ACK_LIMIT + ADR_ACK_DELAY) as u32 {
                 let past_limit = self.adr_ack_cnt - ADR_ACK_LIMIT as u32;
                 if past_limit.is_multiple_of(ADR_ACK_DELAY as u32) {
-                    match next_lower_datarate(region, configuration.data_rate) {
-                        Some(dr) => configuration.data_rate = dr,
-                        // At the default data rate, the backoff step re-enables
-                        // the region's default channels and resets NbTrans to 1
-                        // so a device left in a silent network stops
-                        // retransmitting every frame.
-                        None => {
-                            region.enable_default_channels();
-                            configuration.nb_trans = 1;
+                    if past_limit == ADR_ACK_DELAY as u32 {
+                        // First backoff step: raise TX power to the maximum.
+                        configuration.tx_power = region.check_tx_power(0).flatten();
+                    } else {
+                        match next_lower_datarate(region, configuration.data_rate) {
+                            Some(dr) => configuration.data_rate = dr,
+                            // At the default data rate, the backoff step re-enables
+                            // the region's default channels and resets NbTrans to 1
+                            // so a device left in a silent network stops
+                            // retransmitting every frame.
+                            None => {
+                                region.enable_default_channels();
+                                configuration.nb_trans = 1;
+                            }
                         }
                     }
                 }
@@ -350,7 +393,7 @@ impl Session {
         data: &SendData<'_>,
         tx_buffer: &mut RadioBuffer<N>,
         configuration: &super::Configuration,
-        region: &region::Configuration,
+        max_mac_payload_len: u8,
     ) -> FcntUp {
         tx_buffer.clear();
         let fcnt = self.fcnt_up;
@@ -363,10 +406,9 @@ impl Session {
 
         let adr = configuration.adr_enabled;
         // ADRACKReq asks the network for a downlink so ADR can keep working.
-        // It is not set when already at the lowest usable data rate.
-        let adr_ack_req = adr
-            && self.adr_ack_cnt >= ADR_ACK_LIMIT as u32
-            && next_lower_datarate(region, configuration.data_rate).is_some();
+        // It stays set until a downlink is received, including at the lowest
+        // data rate.
+        let adr_ack_req = adr && self.adr_ack_cnt >= ADR_ACK_LIMIT as u32;
 
         self.confirmed = data.confirmed;
         #[cfg(feature = "certification")]
@@ -374,17 +416,30 @@ impl Session {
             self.confirmed = v;
         }
 
-        // FPort 0 sends the queued MAC commands as the FRMPayload (encrypted
-        // with the NwkSKey) with FOpts left empty; the spec forbids
-        // application data on port 0. Any other port piggybacks the queued
-        // commands in FOpts.
+        // MAC answers take priority over application data. If they fit in
+        // FOpts, keep the application payload. Otherwise send them in FPort 0
+        // and truncate only at the current data rate's maximum payload.
+        let max_frm_payload =
+            max_mac_payload_len.saturating_sub(FHDR_MIN_LEN as u8 + FPORT_LEN as u8) as usize;
+        let mac_commands = self.uplink.mac_commands();
+        let mac_commands_len = mac_commands_prefix_len(mac_commands, max_frm_payload);
+        self.app_payload_dropped = false;
         let (f_opts, payload) = match NonZeroU8::new(data.fport) {
-            Some(f_port) => (self.uplink.mac_commands(), Payload::Data { f_port, data: data.data }),
+            // Keep the application payload only when the queued MAC answers
+            // fit in FOpts and within the current data rate's payload limit.
+            Some(f_port) if mac_commands.len() <= FOPTS_MAX_LEN.min(max_frm_payload) => {
+                (mac_commands, Payload::Data { f_port, data: data.data })
+            }
+            Some(_) => {
+                self.app_payload_dropped = !data.data.is_empty();
+                (&[][..], Payload::MacCommands(&mac_commands[..mac_commands_len]))
+            }
             None => {
                 if !data.data.is_empty() {
+                    // TODO: Return a proper Error instead of panicking.
                     panic!("Error assembling packet! Data payload with fport 0 not allowed");
                 }
-                (&[][..], Payload::MacCommands(self.uplink.mac_commands()))
+                (&[][..], Payload::MacCommands(&mac_commands[..mac_commands_len]))
             }
         };
         let frame = DataFrame {
@@ -409,10 +464,18 @@ impl Session {
                 tx_buffer.clear();
                 tx_buffer.extend_from_slice(packet).unwrap();
             }
+            // TODO: Return a proper Error instead of panicking.
             Err(e) => panic!("Error assembling packet! {:?} ", e),
         }
         self.uplink.clear_mac_commands(true);
         fcnt
+    }
+
+    /// Whether the last prepared uplink dropped non-empty application data.
+    pub(crate) fn take_payload_dropped(&mut self) -> bool {
+        let dropped = self.app_payload_dropped;
+        self.app_payload_dropped = false;
+        dropped
     }
 
     fn handle_downlink_macs(
@@ -584,6 +647,22 @@ impl Session {
     }
 }
 
+/// Length of the longest prefix of complete MAC commands that fits in `max_len`.
+fn mac_commands_prefix_len(data: &[u8], max_len: usize) -> usize {
+    let mut len = 0;
+    for command in parse_uplink_mac_commands(data) {
+        let Ok(command) = command else {
+            break;
+        };
+        let command_len = 1 + command.payload_bytes().len();
+        if len + command_len > max_len {
+            break;
+        }
+        len += command_len;
+    }
+    len
+}
+
 /// Next lower region-supported data rate, if any.
 fn next_lower_datarate(region: &region::Configuration, current: DR) -> Option<DR> {
     let current = current as u8;
@@ -651,11 +730,13 @@ mod tests {
 
     fn uplink_fctrl(session: &mut Session, mac: &Mac) -> lorawan::parser::FCtrl {
         let mut tx: RadioBuffer<256> = RadioBuffer::new();
+        let max_mac_payload_len =
+            mac.region.get_max_payload_length(mac.configuration.data_rate, false, false);
         session.prepare_buffer::<256>(
             &SendData { data: &[], fport: 1, confirmed: false },
             &mut tx,
             &mac.configuration,
-            &mac.region,
+            max_mac_payload_len,
         );
         EncryptedDataPayload::parse(tx.as_mut_for_read()).unwrap().fhdr().fctrl()
     }
@@ -699,6 +780,115 @@ mod tests {
         };
         let mut dl: heapless::Vec<Downlink, 1> = heapless::Vec::new();
         mac.handle_rx::<256, 1>(&mut rx, &mut dl, 10, &rf_config)
+    }
+
+    /// Feed an encrypted downlink with an application payload on `fport` into
+    /// a Mac with the standard test session, returning the Mac's response.
+    #[cfg(feature = "certification")]
+    fn handle_downlink_on_port(mac: &mut Mac, fport: u8, data: &[u8], fcnt: u32) -> Response {
+        handle_downlink_on_port_with_fopts(mac, &[], fport, data, fcnt)
+    }
+
+    /// As [`handle_downlink_on_port`], with MAC commands in the FHDR FOpts.
+    #[cfg(feature = "certification")]
+    fn handle_downlink_on_port_with_fopts(
+        mac: &mut Mac,
+        f_opts: &[u8],
+        fport: u8,
+        data: &[u8],
+        fcnt: u32,
+    ) -> Response {
+        let mut rx: RadioBuffer<256> = RadioBuffer::new();
+        let mut buf = [0u8; 256];
+        let nwk_crypto = DefaultCrypto::new(NwkSKey::from([2; 16]).inner());
+        let app_crypto = DefaultCrypto::new(AppSKey::from([1; 16]).inner());
+        let frame = DataFrame {
+            frame_type: DataFrameType::UnconfirmedDown,
+            dev_addr: DevAddr::from_value(1),
+            fcnt,
+            f_opts,
+            payload: Payload::Data { f_port: NonZeroU8::new(fport).unwrap(), data },
+            ..Default::default()
+        };
+        let packet = frame.build_into(&mut buf, &nwk_crypto, Some(&app_crypto)).unwrap();
+        rx.extend_from_slice(packet).unwrap();
+
+        let dr = mac.region.get_datarate(5).unwrap();
+        let rf_config = RfConfig {
+            frequency: 868_100_000,
+            bb: BaseBandModulationParams::new(
+                dr.spreading_factor,
+                dr.bandwidth,
+                mac.region.get_coding_rate(),
+            ),
+            max_payload_len: 255,
+        };
+        let mut dl: heapless::Vec<Downlink, 1> = heapless::Vec::new();
+        mac.handle_rx::<256, 1>(&mut rx, &mut dl, 10, &rf_config)
+    }
+
+    #[cfg(feature = "certification")]
+    #[test]
+    fn certification_clips_oversized_echo_payload() {
+        use lorawan::packet_length::phy::{MHDR_LEN, MIC_LEN};
+        let mut mac = eu868_mac();
+        mac.set_session(session());
+
+        for (fcnt, dr, data_len) in [(0, DR::_0, 51usize), (1, DR::_3, 115usize)] {
+            mac.configuration.data_rate = dr;
+            let mut payload: heapless::Vec<u8, 256> = heapless::Vec::new();
+            payload.push(0x08).unwrap();
+            for _ in 0..data_len {
+                payload.push(0x01).unwrap();
+            }
+            let response = handle_downlink_on_port(&mut mac, 224, &payload, fcnt);
+            assert!(
+                matches!(response, Response::UplinkPrepared),
+                "oversized EchoPayloadAns must be clipped"
+            );
+
+            let max_mac = mac.region.get_max_payload_length(dr, false, false) as usize;
+            let mut tx: RadioBuffer<256> = RadioBuffer::new();
+            mac.certification_setup_send::<_, 256>(&mut SeqRng(0), &mut tx).unwrap();
+            assert_eq!(tx.as_mut_for_read().len(), MHDR_LEN + max_mac + MIC_LEN);
+        }
+    }
+
+    /// An answer that exactly fills the FRMPayload room of the current DR
+    /// still goes out, and the queued MAC answers it carries in FOpts count
+    /// against that room.
+    #[cfg(feature = "certification")]
+    #[test]
+    fn certification_echo_answer_fits_with_fopts() {
+        use lorawan::packet_length::phy::{MHDR_LEN, MIC_LEN};
+        let mut mac = eu868_mac();
+        mac.set_session(session());
+        mac.configuration.data_rate = DR::_0;
+        let max_phy = MHDR_LEN + 59 + MIC_LEN;
+
+        // 50 echoed bytes: answer is 51 bytes, exactly N for DR0 with no FOpts
+        let mut payload: heapless::Vec<u8, 256> = heapless::Vec::new();
+        payload.push(0x08).unwrap();
+        for _ in 0..50 {
+            payload.push(0x01).unwrap();
+        }
+        let response = handle_downlink_on_port(&mut mac, 224, &payload, 0);
+        assert!(matches!(response, Response::UplinkPrepared));
+        let mut tx: RadioBuffer<256> = RadioBuffer::new();
+        mac.certification_setup_send::<_, 256>(&mut SeqRng(0), &mut tx).unwrap();
+        assert_eq!(tx.as_mut_for_read().len(), max_phy);
+
+        // Same echo with a DevStatusReq in the downlink's FOpts: the 3-byte
+        // DevStatusAns rides along in the answer's FOpts, so the echo is
+        // clipped to keep the frame within the DR0 payload limit.
+        let response = handle_downlink_on_port_with_fopts(&mut mac, &[0x06], 224, &payload, 1);
+        assert!(
+            matches!(response, Response::UplinkPrepared),
+            "echo answer must be clipped to leave room for FOpts"
+        );
+        let mut tx: RadioBuffer<256> = RadioBuffer::new();
+        mac.certification_setup_send::<_, 256>(&mut SeqRng(0), &mut tx).unwrap();
+        assert_eq!(tx.as_mut_for_read().len(), max_phy);
     }
 
     #[test]
@@ -755,13 +945,47 @@ mod tests {
         let mut session = session();
         session.adr_ack_cnt = (super::ADR_ACK_LIMIT + super::ADR_ACK_DELAY - 1) as u32;
 
+        // First backoff step only raises TX power.
         session.rx2_complete(&mut mac.configuration, &mut mac.region);
+        assert_eq!(mac.configuration.data_rate, DR::_5);
+
+        // Next backoff step lowers the data rate.
+        for _ in 0..super::ADR_ACK_DELAY {
+            session.rx2_complete(&mut mac.configuration, &mut mac.region);
+        }
         assert_eq!(mac.configuration.data_rate, DR::_4);
 
+        // Each further ADR_ACK_DELAY lowers the data rate again.
         for _ in 0..super::ADR_ACK_DELAY {
             session.rx2_complete(&mut mac.configuration, &mut mac.region);
         }
         assert_eq!(mac.configuration.data_rate, DR::_3);
+    }
+
+    #[test]
+    fn adr_backoff_raises_tx_power_before_lowering_data_rate() {
+        let mut mac = eu868_mac();
+        mac.configuration.data_rate = DR::_5;
+        mac.configuration.tx_power = mac.region.check_tx_power(1).flatten();
+
+        let mut session = session();
+        session.adr_ack_cnt = (super::ADR_ACK_LIMIT + super::ADR_ACK_DELAY - 1) as u32;
+
+        // The first ADR_ACK_DELAY after the limit only raises TX power.
+        session.rx2_complete(&mut mac.configuration, &mut mac.region);
+        assert_eq!(
+            mac.configuration.data_rate,
+            DR::_5,
+            "ADR backoff must raise TX power before lowering the data rate"
+        );
+        assert_eq!(mac.configuration.tx_power, mac.region.check_tx_power(0).flatten());
+
+        // The next ADR_ACK_DELAY lowers the data rate.
+        for _ in 0..super::ADR_ACK_DELAY {
+            session.rx2_complete(&mut mac.configuration, &mut mac.region);
+        }
+        assert_eq!(mac.configuration.data_rate, DR::_4);
+        assert_eq!(mac.configuration.tx_power, mac.region.check_tx_power(0).flatten());
     }
 
     #[test]
@@ -772,8 +996,16 @@ mod tests {
         let mut session = session();
         session.adr_ack_cnt = (super::ADR_ACK_LIMIT + super::ADR_ACK_DELAY - 1) as u32;
 
-        // First backoff step: the data rate drops to DR0, NbTrans untouched.
+        // First backoff step raises TX power, leaving the data rate and
+        // NbTrans untouched.
         session.rx2_complete(&mut mac.configuration, &mut mac.region);
+        assert_eq!(mac.configuration.data_rate, DR::_1);
+        assert_eq!(mac.configuration.nb_trans, 5);
+
+        // Next backoff step lowers the data rate to DR0, NbTrans untouched.
+        for _ in 0..super::ADR_ACK_DELAY {
+            session.rx2_complete(&mut mac.configuration, &mut mac.region);
+        }
         assert_eq!(mac.configuration.data_rate, DR::_0);
         assert_eq!(mac.configuration.nb_trans, 5);
 
@@ -797,23 +1029,29 @@ mod tests {
         mac.region.channel_mask_set(mask);
         session.adr_ack_cnt = (super::ADR_ACK_LIMIT + super::ADR_ACK_DELAY - 1) as u32;
 
-        // Backoff step at the lowest data rate re-enables the channel.
+        // First backoff step only raises TX power.
         session.rx2_complete(&mut mac.configuration, &mut mac.region);
+        let mask = mac.region.channel_mask_get();
+        assert!(!mask.is_enabled(1).unwrap());
 
+        // Next backoff step at the lowest data rate re-enables the channel.
+        for _ in 0..super::ADR_ACK_DELAY {
+            session.rx2_complete(&mut mac.configuration, &mut mac.region);
+        }
         let mask = mac.region.channel_mask_get();
         assert!(mask.is_enabled(1).unwrap());
     }
 
     #[test]
-    fn adr_ack_req_stops_at_lowest_supported_datarate() {
+    fn adr_ack_req_stays_set_at_lowest_supported_datarate() {
         let mut mac = eu868_mac();
         mac.configuration.data_rate = DR::_0;
         let mut session = session();
-        session.adr_ack_cnt = super::ADR_ACK_LIMIT as u32;
+        session.adr_ack_cnt = (super::ADR_ACK_LIMIT + super::ADR_ACK_DELAY) as u32;
 
         let fctrl = uplink_fctrl(&mut session, &mac);
         assert!(fctrl.adr());
-        assert!(!fctrl.adr_ack_req());
+        assert!(fctrl.adr_ack_req());
     }
 
     /// A deterministic RNG returning consecutive u32 values so tests can
@@ -841,6 +1079,51 @@ mod tests {
             self.fill_bytes(bytes);
             Ok(())
         }
+    }
+
+    #[test]
+    fn prepare_buffer_reports_dropped_application_payload() {
+        let mut mac = eu868_mac();
+        mac.set_session(session());
+        let configuration = mac.configuration;
+        let max_mac_payload_len =
+            mac.region.get_max_payload_length(configuration.data_rate, false, false);
+        let session = mac.get_session_mut().unwrap();
+        for _ in 0..8 {
+            session.uplink.add_mac_command(LinkADRAnsCreator::new());
+        }
+
+        let mut tx: RadioBuffer<256> = RadioBuffer::new();
+        session.prepare_buffer::<256>(
+            &SendData { data: &[1, 2, 3], fport: 1, confirmed: false },
+            &mut tx,
+            &configuration,
+            max_mac_payload_len,
+        );
+
+        assert!(session.take_payload_dropped());
+        assert!(!session.take_payload_dropped());
+    }
+
+    #[test]
+    fn send_reports_dropped_application_payload() {
+        let mut mac = eu868_mac();
+        mac.set_session(session());
+        for _ in 0..8 {
+            mac.get_session_mut().unwrap().uplink.add_mac_command(LinkADRAnsCreator::new());
+        }
+
+        let mut rng = SeqRng(0);
+        let mut tx: RadioBuffer<256> = RadioBuffer::new();
+        mac.send::<SeqRng, 256>(
+            &mut rng,
+            &mut tx,
+            &SendData { data: &[1, 2, 3], fport: 1, confirmed: false },
+        )
+        .unwrap();
+
+        assert!(mac.take_payload_dropped());
+        assert!(!mac.take_payload_dropped());
     }
 
     #[test]
@@ -1001,11 +1284,13 @@ mod tests {
 
         let mut tx: RadioBuffer<256> = RadioBuffer::new();
         let mac = Mac::new(region::Configuration::new(region::Region::EU868), 14, 0);
+        let max_mac_payload_len =
+            mac.region.get_max_payload_length(mac.configuration.data_rate, false, false);
         session.prepare_buffer::<256>(
             &SendData { data: &[], fport: 0, confirmed: false },
             &mut tx,
             &mac.configuration,
-            &mac.region,
+            max_mac_payload_len,
         );
 
         let bytes = tx.as_mut_for_read();

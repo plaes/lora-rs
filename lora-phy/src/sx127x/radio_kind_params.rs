@@ -5,8 +5,6 @@ use embedded_hal_async::spi::SpiDevice;
 
 #[allow(async_fn_in_trait)]
 pub trait Sx127xVariant {
-    type Data: Default;
-
     async fn init_lora<SPI: SpiDevice<u8>, IV: InterfaceVariant>(
         radio: &mut Sx127x<SPI, IV, Self>,
         sync_word: u8,
@@ -142,7 +140,7 @@ impl IrqMask {
         self as u8
     }
 
-    pub fn is_set_in(self, mask: u8) -> bool {
+    pub fn is_set(self, mask: u8) -> bool {
         self.value() & mask == self.value()
     }
 }
@@ -255,9 +253,8 @@ impl LnaGain {
     }
 }
 
-/// PA DAC configuration - sx1276+
+/// PA DAC configuration
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub enum PaDac {
     _20DbmOn = 0x87,
     _20DbmOff = 0x84,
@@ -269,12 +266,12 @@ impl PaDac {
     }
 }
 
-/// PA configuration - sx1276+
+/// PA configuration
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub enum PaConfig {
     PaBoost = 0x80,
-    MaxPower7NoPaBoost = 0x70,
+    RfoMaxPower7 = 0x70,
+    RfoMaxPower0 = 0x00,
 }
 
 impl PaConfig {

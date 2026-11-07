@@ -3,24 +3,18 @@ use crate::mod_traits::InterfaceVariant;
 use crate::sx127x::radio_kind_params::{
     OcpTrim, PaConfig, PaDac, RampTime, Register, Sx127xVariant, coding_rate_denominator_value, spreading_factor_value,
 };
-use crate::sx127x::{
-    SX1276_RF_MID_BAND_THRESH, SX1276_RSSI_OFFSET_HF, SX1276_RSSI_OFFSET_LF, Sx127x, pll_step_to_freq,
-};
+use crate::sx127x::{Sx127x, pll_step_to_freq};
 use embedded_hal_async::spi::SpiDevice;
 use lora_modulation::Bandwidth;
+
+pub(super) const SX1276_RSSI_OFFSET_LF: i16 = -164;
+pub(super) const SX1276_RSSI_OFFSET_HF: i16 = -157;
+const SX1276_RF_MID_BAND_THRESH: u32 = 525_000_000;
 
 /// Sx1276 implements the Sx127xVariant trait
 pub struct Sx1276;
 
-#[derive(Default)]
-pub struct Sx1276Data {
-    /// flag to indicate the Errata 2.1: Sensitivity optimization with 500 kHz bandwidth is required
-    sensitivity_quirk: bool,
-}
-
 impl Sx127xVariant for Sx1276 {
-    type Data = Sx1276Data;
-
     async fn init_lora<SPI: SpiDevice<u8>, IV: InterfaceVariant>(
         radio: &mut Sx127x<SPI, IV, Self>,
         _sync_word: u8,
@@ -28,8 +22,8 @@ impl Sx127xVariant for Sx1276 {
         let chip_version = radio.read_register(Register::RegVersion).await?;
         debug!("Detected sx1276 v{}", chip_version);
 
-        // Errata 2.1: Sensitivity optimization only applies to version 0x12
-        radio.data.sensitivity_quirk = chip_version == 0x12;
+        // SX1276 Errata 2.1: sensitivity optimization only applies to version 0x12
+        radio.sx1276_sensitivity_quirk = chip_version == 0x12;
 
         Ok(())
     }
@@ -90,9 +84,9 @@ impl Sx127xVariant for Sx1276 {
             // MaxPower=7 for negative targets, casting a negative OutputPower
             // to u8 and corrupting the register (PA_BOOST bit included).
             let (max_power, output_power) = if txp > 0 {
-                (PaConfig::MaxPower7NoPaBoost.value(), txp)
+                (PaConfig::RfoMaxPower7.value(), txp)
             } else {
-                (0x00, txp + 4)
+                (PaConfig::RfoMaxPower0.value(), txp + 4)
             };
 
             radio.write_register(pa_reg, PaDac::_20DbmOff.value()).await?;
@@ -139,11 +133,8 @@ impl Sx127xVariant for Sx1276 {
         config_3 = (config_3 & 0xf3u8) | ldro_agc_auto_flags;
         radio.write_register(Register::RegModemConfig3, config_3).await?;
 
-        if radio.data.sensitivity_quirk {
-            // apply Errata 2.1: Sensitivity optimization with 500 kHz bandwidth.
-            // Errata band edges are in Hz; these literals used to be in kHz,
-            // so no real frequency ever matched and the optimization values
-            // were never written
+        if radio.sx1276_sensitivity_quirk {
+            // Apply SX1276 Errata 2.1: sensitivity optimization with 500 kHz bandwidth.
             let bw500_optimize = match (mdltn_params.bandwidth, mdltn_params.frequency_in_hz) {
                 (Bandwidth::_500KHz, 862_000_000..=1_020_000_000) => Some(0x64),
                 (Bandwidth::_500KHz, 410_000_000..=525_000_000) => Some(0x7f),

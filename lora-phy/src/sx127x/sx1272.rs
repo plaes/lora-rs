@@ -1,16 +1,18 @@
 use crate::mod_params::{ModulationParams, PacketParams, RadioError};
 use crate::mod_traits::InterfaceVariant;
-use crate::sx127x::radio_kind_params::{RampTime, Register, Sx127xVariant, coding_rate_value, spreading_factor_value};
-use crate::sx127x::{SX1272_RSSI_OFFSET, Sx127x};
+use crate::sx127x::Sx127x;
+use crate::sx127x::radio_kind_params::{
+    PaConfig, PaDac, RampTime, Register, Sx127xVariant, coding_rate_value, spreading_factor_value,
+};
 use embedded_hal_async::spi::SpiDevice;
 use lora_modulation::Bandwidth;
+
+pub(super) const SX1272_RSSI_OFFSET: i16 = -139;
 
 /// Sx1272 implements the Sx127xVariant trait
 pub struct Sx1272;
 
 impl Sx127xVariant for Sx1272 {
-    type Data = ();
-
     async fn init_lora<SPI: SpiDevice<u8>, IV: InterfaceVariant>(
         _radio: &mut Sx127x<SPI, IV, Self>,
         _sync_word: u8,
@@ -55,19 +57,29 @@ impl Sx127xVariant for Sx1272 {
             if p_out > 17 {
                 // PA_BOOST out: +5 .. +20 dBm
                 let val = (p_out.clamp(5, 20) - 5) as u8 & 0x0f;
-                radio.write_register(Register::RegPaConfig, (1 << 7) | val).await?;
-                radio.write_register(Register::RegPaDacSX1272, 0x87).await?;
+                radio
+                    .write_register(Register::RegPaConfig, PaConfig::PaBoost.value() | val)
+                    .await?;
+                radio
+                    .write_register(Register::RegPaDacSX1272, PaDac::_20DbmOn.value())
+                    .await?;
             } else {
                 // PA_BOOST out: +2 .. +17 dBm
                 let val = (p_out.clamp(2, 17) - 2) as u8 & 0x0f;
-                radio.write_register(Register::RegPaConfig, (1 << 7) | val).await?;
-                radio.write_register(Register::RegPaDacSX1272, 0x84).await?;
+                radio
+                    .write_register(Register::RegPaConfig, PaConfig::PaBoost.value() | val)
+                    .await?;
+                radio
+                    .write_register(Register::RegPaDacSX1272, PaDac::_20DbmOff.value())
+                    .await?;
             }
         } else {
             // RFO out: -1 to +14 dBm
             let val = (p_out.clamp(-1, 14) + 1) as u8 & 0x0f;
             radio.write_register(Register::RegPaConfig, val).await?;
-            radio.write_register(Register::RegPaDacSX1272, 0x84).await?;
+            radio
+                .write_register(Register::RegPaDacSX1272, PaDac::_20DbmOff.value())
+                .await?;
         }
 
         Ok(())

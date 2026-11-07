@@ -97,6 +97,8 @@ pub(crate) struct Mac {
     pub region: region::Configuration,
     board_eirp: BoardEirp,
     state: State,
+    /// Whether the last prepared uplink dropped non-empty application data.
+    payload_dropped: bool,
     #[cfg(feature = "certification")]
     certification: certification::Certification,
     /// Actual TX duration and RX windows of the prepared certification answer
@@ -143,6 +145,7 @@ impl Mac {
             board_eirp: BoardEirp { max_power, antenna_gain },
             region,
             state: State::Unjoined,
+            payload_dropped: false,
             configuration: Configuration {
                 data_rate,
                 rx1_delay: region::constants::RECEIVE_DELAY1,
@@ -199,21 +202,37 @@ impl Mac {
         buf: &mut RadioBuffer<N>,
         send_data: &SendData<'_>,
     ) -> Result<(radio::TxConfig, RxWindows, FcntUp)> {
-        let fcnt = match &mut self.state {
+        let max_mac_payload_len =
+            self.region.get_max_payload_length(self.configuration.data_rate, false, false);
+        self.payload_dropped = false;
+        let (fcnt, payload_dropped) = match &mut self.state {
             State::Joined(session) => {
-                let fcnt =
-                    session.prepare_buffer::<N>(send_data, buf, &self.configuration, &self.region);
+                let fcnt = session.prepare_buffer::<N>(
+                    send_data,
+                    buf,
+                    &self.configuration,
+                    max_mac_payload_len,
+                );
+                let payload_dropped = session.take_payload_dropped();
                 // Uplinks prepared here (data uplinks and certification answers)
                 // participate in NbTrans retransmission; multicast setup uplinks
                 // do not.
                 session.retransmissions = 1;
-                Ok(fcnt)
+                Ok((fcnt, payload_dropped))
             }
             State::Otaa(_) => Err(Error::NotJoined),
             State::Unjoined => Err(Error::NotJoined),
         }?;
+        self.payload_dropped = payload_dropped;
         let (tx_config, rx_windows) = self.tx_config_and_windows(rng);
         Ok((tx_config, rx_windows, fcnt))
+    }
+
+    /// Whether the last prepared uplink dropped non-empty application data.
+    pub(crate) fn take_payload_dropped(&mut self) -> bool {
+        let dropped = self.payload_dropped;
+        self.payload_dropped = false;
+        dropped
     }
 
     /// Prepare the radio configuration and RX windows for a NbTrans
@@ -261,8 +280,11 @@ impl Mac {
         rng: &mut RNG,
         buf: &mut RadioBuffer<N>,
     ) -> Result<(radio::TxConfig, FcntUp)> {
-        self.multicast.setup_send::<N>(&mut self.state, buf, &self.configuration, &self.region).map(
-            |fcnt_up| {
+        let max_mac_payload_len =
+            self.region.get_max_payload_length(self.configuration.data_rate, false, false);
+        self.multicast
+            .setup_send::<N>(&mut self.state, buf, &self.configuration, max_mac_payload_len)
+            .map(|fcnt_up| {
                 // No RX windows follow this uplink; the caller re-arms the RXC window.
                 let (mut tx_config, _) =
                     self.region.create_tx_config(rng, self.configuration.data_rate, &Frame::Data);
@@ -271,8 +293,7 @@ impl Mac {
                     self.board_eirp.antenna_gain,
                 );
                 (tx_config, fcnt_up)
-            },
-        )
+            })
     }
 
     /// Prepare the pending certification uplink for transmission. A certification answer is a

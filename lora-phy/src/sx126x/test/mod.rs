@@ -400,10 +400,7 @@ async fn test_get_irq_status() {
     use crate::mod_traits::IrqState;
     let mut sx1261 = get_sx126x();
     sx1261.spi_mut().prime_read(&[0x12], &[0x00, 0x00, 0x01]); // TxDone
-    let state = sx1261
-        .process_irq_event(RadioMode::Transmit, None, false)
-        .await
-        .unwrap();
+    let state = sx1261.process_irq_event(RadioMode::Transmit, false).await.unwrap();
     assert!(matches!(state, Some(IrqState::Done)));
 
     let mut fixture = TestFixture::new();
@@ -836,6 +833,38 @@ async fn test_emulated_cad_end_to_end() {
         lora.cad(&mdltn_params).await,
         Err(crate::mod_params::RadioError::InvalidRadioMode)
     ));
+}
+
+/// A wake-up with no CAD flag behind it must not end the CAD. On STM32WL an
+/// interrupt that fires after its awaiting operation was cancelled stays
+/// latched and ends the next wait at once (lora-rs/lora-rs#418); the driver
+/// has to go back to waiting and hand back the chip's real result.
+#[tokio::test]
+async fn test_emulated_cad_rides_through_spurious_wake() {
+    let chip = Chip::new();
+    let mut lora = LoRa::new(get_emulated_sx1261(&chip), true, Delayer).await.unwrap();
+    let mdltn_params = modulation(&mut lora);
+
+    chip.with_model(|m| {
+        m.cad_activity = true;
+        m.hold_cad = true;
+        m.spurious_irq_wakes = 1;
+    });
+    // The result lands once the driver is back waiting on the IRQ line
+    let later = chip.clone();
+    tokio::spawn(async move {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        later.finish_cad();
+    });
+
+    lora.prepare_for_cad(&mdltn_params).await.unwrap();
+    assert!(lora.cad(&mdltn_params).await.unwrap());
+    chip.with_model(|m| {
+        assert_eq!(m.spurious_irq_wakes, 0, "the spurious wake was never consumed");
+        assert_eq!(m.mode, Mode::Standby);
+    });
 }
 
 #[tokio::test]

@@ -81,6 +81,8 @@ where
     /// bit and MAC commands) after the radio buffer is reused for reception.
     retransmit_buffer: RadioBuffer<N>,
     downlink: Vec<Downlink, D>,
+    /// Whether the last prepared uplink dropped non-empty application data.
+    payload_dropped: bool,
     #[cfg(feature = "class-c")]
     class_c: bool,
 }
@@ -208,6 +210,7 @@ where
             retransmit_buffer: RadioBuffer::new(),
             timer,
             downlink: Vec::new(),
+            payload_dropped: false,
             #[cfg(feature = "class-c")]
             class_c: false,
         }
@@ -367,8 +370,8 @@ where
     /// data is copied into the provided byte slice.
     ///
     /// The returned future completes when the data have been sent successfully and downlink data,
-    /// if any, is available by calling take_downlink. Response::DownlinkReceived indicates a
-    /// downlink is available.
+    /// if any, is available by calling [`take_downlink`](Self::take_downlink).
+    /// Response::DownlinkReceived indicates a downlink is available.
     ///
     /// When the network has set NbTrans > 1 via LinkADRReq (LoRaWAN 1.0.4), a frame that
     /// receives no downlink in RX1/RX2 is retransmitted automatically with the same FCntUp,
@@ -384,8 +387,13 @@ where
     /// start as soon as `send` returns.
     ///
     /// In Class C mode, it is possible to get one or more downlinks and `Reponse::DownlinkReceived`
-    /// maybe not even be indicated. It is recommended to call `take_downlink` after `send` until
-    /// it returns `None`.
+    /// maybe not even be indicated. It is recommended to call [`take_downlink`](Self::take_downlink)
+    /// after `send` until it returns `None`.
+    ///
+    /// If pending MAC answers do not fit in FOpts, they are sent automatically in
+    /// FPort 0 and the application payload is dropped. Call
+    /// [`take_payload_dropped`](Self::take_payload_dropped) after `send` to check
+    /// whether non-empty application data was dropped.
     pub async fn send(
         &mut self,
         data: &[u8],
@@ -398,6 +406,7 @@ where
             &mut self.radio_buffer,
             &SendData { data, fport, confirmed },
         )?;
+        self.payload_dropped = self.mac.take_payload_dropped();
         // Retain a copy of the built frame for potential NbTrans retransmissions
         self.retransmit_buffer.clear();
         self.retransmit_buffer.extend_from_slice(self.radio_buffer.as_ref_for_read()).unwrap();
@@ -469,6 +478,17 @@ where
     /// data. If no downlink data is available, `None` is returned.
     pub fn take_downlink(&mut self) -> Option<Downlink> {
         self.downlink.pop()
+    }
+
+    /// Return whether the last prepared uplink dropped non-empty application
+    /// data, and clear the status.
+    ///
+    /// Application data is dropped when pending MAC answers do not fit in FOpts
+    /// and are sent automatically in FPort 0 instead.
+    pub fn take_payload_dropped(&mut self) -> bool {
+        let dropped = self.payload_dropped;
+        self.payload_dropped = false;
+        dropped
     }
 
     async fn window_complete(&mut self) -> Result<(), Error<R::PhyError>> {

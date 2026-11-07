@@ -20,6 +20,8 @@ where
     RNG: RngCore,
 {
     state: State,
+    /// Whether the last prepared uplink dropped non-empty application data.
+    payload_dropped: bool,
     shared: Shared<R, RNG, N, D>,
 }
 
@@ -31,6 +33,7 @@ where
     pub fn new(region: region::Configuration, radio: R, rng: RNG) -> Device<R, RNG, N, D> {
         Device {
             state: State::default(),
+            payload_dropped: false,
             shared: Shared {
                 radio,
                 rng,
@@ -91,6 +94,11 @@ where
     /// After the last confirmed attempt, the stack waits `RETRANSMIT_TIMEOUT`
     /// before reporting `Response::NoAck`. The next uplink can start as soon as
     /// `send` returns `NoAck`.
+    ///
+    /// If pending MAC answers do not fit in FOpts, they are sent automatically in
+    /// FPort 0 and the application payload is dropped. Call
+    /// [`take_payload_dropped`](Self::take_payload_dropped) after `send` to check
+    /// whether non-empty application data was dropped.
     pub fn send(&mut self, data: &[u8], fport: u8, confirmed: bool) -> Result<Response, Error<R>> {
         self.handle_event(Event::SendDataRequest(SendData { data, fport, confirmed }))
     }
@@ -115,7 +123,19 @@ where
         self.shared.downlink.pop()
     }
 
+    /// Return whether the last prepared uplink dropped non-empty application
+    /// data, and clear the status.
+    ///
+    /// Application data is dropped when pending MAC answers do not fit in FOpts
+    /// and are sent automatically in FPort 0 instead.
+    pub fn take_payload_dropped(&mut self) -> bool {
+        let dropped = self.payload_dropped;
+        self.payload_dropped = false;
+        dropped
+    }
+
     pub fn handle_event(&mut self, event: Event<'_, R>) -> Result<Response, Error<R>> {
+        let send_request = matches!(&event, Event::SendDataRequest(_));
         let (new_state, result) = self.state.handle_event::<R, RNG, N, D>(
             &mut self.shared.mac,
             &mut self.shared.radio,
@@ -126,6 +146,9 @@ where
             event,
         );
         self.state = new_state;
+        if send_request {
+            self.payload_dropped = self.shared.mac.take_payload_dropped();
+        }
         result
     }
 }

@@ -22,13 +22,6 @@ const TCXO_FOR_OSCILLATOR: u8 = 0x10u8;
 const SX127X_MIN_LORA_SYMB_NUM_TIMEOUT: u16 = 4;
 const SX127X_MAX_LORA_SYMB_NUM_TIMEOUT: u16 = 1023;
 
-// Constant values need to compute the RSSI value
-const SX1272_RSSI_OFFSET: i16 = -139;
-const SX1276_RSSI_OFFSET_LF: i16 = -164;
-const SX1276_RSSI_OFFSET_HF: i16 = -157;
-const SX1276_RF_MID_BAND_THRESH: u32 = 525_000_000;
-
-// Frequency synthesizer step: FXOSC (32 MHz) / 524288 (2^19) = 61.03515625 Hz
 fn freq_to_pll_step(freq_in_hz: u32) -> u32 {
     // Full-precision integer form of freq / 61.03515625. The previous
     // truncate-then-shift shortcut zeroed the low 8 pll-step bits, putting
@@ -67,7 +60,8 @@ pub struct Config<C: Sx127xVariant> {
 pub struct Sx127x<SPI, IV, C: Sx127xVariant + Sized> {
     intf: SpiInterface<SPI, IV>,
     config: Config<C>,
-    data: C::Data,
+    /// Whether the SX1276 Errata 2.1 sensitivity workaround is required.
+    sx1276_sensitivity_quirk: bool,
 }
 
 impl<SPI, IV, C> Sx127x<SPI, IV, C>
@@ -82,7 +76,7 @@ where
         Self {
             intf,
             config,
-            data: Default::default(),
+            sx1276_sensitivity_quirk: false,
         }
     }
 
@@ -122,6 +116,16 @@ where
     // Set the over current protection (mA) on the radio
     async fn set_ocp(&mut self, ocp_trim: OcpTrim) -> Result<(), RadioError> {
         self.write_register(Register::RegOcp, ocp_trim.value()).await
+    }
+
+    // Configure the LNA gain for RX and CAD
+    async fn set_lna_gain(&mut self) -> Result<(), RadioError> {
+        let lna_gain = if self.config.rx_boost {
+            LnaGain::G1.boosted_value()
+        } else {
+            LnaGain::G1.value()
+        };
+        self.write_register(Register::RegLna, lna_gain).await
     }
 
     #[cfg(test)]
@@ -388,12 +392,7 @@ where
 
         self.set_lora_symbol_num_timeout(num_symbols).await?;
 
-        let lna_gain = if self.config.rx_boost {
-            LnaGain::G1.boosted_value()
-        } else {
-            LnaGain::G1.value()
-        };
-        self.write_register(Register::RegLna, lna_gain).await?;
+        self.set_lna_gain().await?;
 
         self.write_register(Register::RegFifoAddrPtr, 0x00u8).await?;
 
@@ -459,11 +458,7 @@ where
     async fn do_cad(&mut self, _mdltn_params: &ModulationParams) -> Result<(), RadioError> {
         self.intf.iv.enable_rf_switch_rx().await?;
 
-        let mut lna_gain_final = LnaGain::G1.value();
-        if self.config.rx_boost {
-            lna_gain_final = LnaGain::G1.boosted_value();
-        }
-        self.write_register(Register::RegLna, lna_gain_final).await?;
+        self.set_lna_gain().await?;
 
         self.write_register(Register::RegOpMode, LoRaMode::Cad.value()).await
     }
@@ -543,48 +538,41 @@ where
         self.intf.iv.await_irq().await
     }
 
-    async fn get_irq_state(
-        &mut self,
-        radio_mode: RadioMode,
-        cad_activity_detected: Option<&mut bool>,
-    ) -> Result<Option<IrqState>, RadioError> {
+    async fn get_irq_state(&mut self, radio_mode: RadioMode) -> Result<Option<IrqState>, RadioError> {
         let irq_flags = self.read_register(Register::RegIrqFlags).await?;
         match radio_mode {
             RadioMode::Transmit => {
-                if (irq_flags & IrqMask::TxDone.value()) == IrqMask::TxDone.value() {
+                if IrqMask::TxDone.is_set(irq_flags) {
                     debug!("TxDone in radio mode {}", radio_mode);
                     return Ok(Some(IrqState::Done));
                 }
             }
             RadioMode::Receive(RxMode::Continuous | RxMode::Single(_) | RxMode::SingleMs(_)) => {
-                if (irq_flags & IrqMask::RxDone.value()) == IrqMask::RxDone.value() {
-                    if IrqMask::CRCError.is_set_in(irq_flags) {
+                if IrqMask::RxDone.is_set(irq_flags) {
+                    if IrqMask::CRCError.is_set(irq_flags) {
                         debug!("RxDone with CRCError in radio mode {}", radio_mode);
                         return Err(RadioError::CrcError);
                     }
                     debug!("RxDone in radio mode {}", radio_mode);
                     return Ok(Some(IrqState::Done));
                 }
-                if (irq_flags & IrqMask::RxTimeout.value()) == IrqMask::RxTimeout.value() {
+                if IrqMask::RxTimeout.is_set(irq_flags) {
                     debug!("RxTimeout in radio mode {}", radio_mode);
                     return Err(RadioError::ReceiveTimeout);
                 }
-                if IrqMask::HeaderValid.is_set_in(irq_flags) {
+                if IrqMask::HeaderValid.is_set(irq_flags) {
                     debug!("HeaderValid in radio mode {}", radio_mode);
                     return Ok(Some(IrqState::PreambleReceived));
                 }
             }
             RadioMode::ChannelActivityDetection => {
-                if (irq_flags & IrqMask::CADDone.value()) == IrqMask::CADDone.value() {
+                if IrqMask::CADDone.is_set(irq_flags) {
                     debug!("CADDone in radio mode {}", radio_mode);
-                    // TODO: don't like how we mutate the cad_activity_detected parameter
-                    if let Some(cad_activity_detected) = cad_activity_detected {
-                        // Check if the CAD (Channel Activity Detection) Activity Detected flag is set in irq_flags and then update the reference
-                        *(cad_activity_detected) =
-                            (irq_flags & IrqMask::CADActivityDetected.value()) == IrqMask::CADActivityDetected.value();
-                    }
-
-                    return Ok(Some(IrqState::Done));
+                    return Ok(Some(if IrqMask::CADActivityDetected.is_set(irq_flags) {
+                        IrqState::CadDetected
+                    } else {
+                        IrqState::Done
+                    }));
                 }
             }
             RadioMode::Sleep | RadioMode::Standby | RadioMode::Listen => {
@@ -610,10 +598,9 @@ where
     async fn process_irq_event(
         &mut self,
         radio_mode: RadioMode,
-        cad_activity_detected: Option<&mut bool>,
         clear_interrupts: bool,
     ) -> Result<Option<IrqState>, RadioError> {
-        let irq_state = self.get_irq_state(radio_mode, cad_activity_detected).await;
+        let irq_state = self.get_irq_state(radio_mode).await;
         if clear_interrupts {
             self.clear_irq_status().await?;
         }
@@ -651,7 +638,11 @@ mod tests {
     fn test_rssi_linearization() {
         // rounded to the nearest 0.25 dB, so never more than 0.125 dB off
         const DELTA: f32 = 0.125;
-        for offset in [SX1272_RSSI_OFFSET, SX1276_RSSI_OFFSET_LF, SX1276_RSSI_OFFSET_HF] {
+        for offset in [
+            sx1272::SX1272_RSSI_OFFSET,
+            sx1276::SX1276_RSSI_OFFSET_LF,
+            sx1276::SX1276_RSSI_OFFSET_HF,
+        ] {
             for rssi in 0..=u8::MAX {
                 let float_rssi = offset as f32 + rssi as f32 * 16.0 / 15.0;
                 let approx_rssi = (4 * offset + linearize_rssi_quarter(rssi)) as f32 / 4.0;

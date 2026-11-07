@@ -72,16 +72,25 @@ pub(crate) struct DynamicChannelPlan<R: DynamicChannelRegion> {
 }
 
 impl<R: DynamicChannelRegion> DynamicChannelPlan<R> {
-    fn new(freq_fn: fn(u32) -> bool) -> Self {
+    fn default_channels() -> ChannelPlan {
         let mut channels = [None; NUM_CHANNELS_DYNAMIC as usize];
         R::init_channels(&mut channels);
+        channels
+    }
 
+    fn new(freq_fn: fn(u32) -> bool) -> Self {
         Self {
-            channels,
+            channels: Self::default_channels(),
             channel_mask: Default::default(),
             _dynamic_channel_region: Default::default(),
             frequency_valid: freq_fn,
         }
+    }
+
+    /// Set or remove a channel and keep its mask bit in sync.
+    fn set_channel(&mut self, index: usize, channel: Option<Channel>) {
+        self.channels[index] = channel;
+        self.channel_mask.set_channel(index, channel.is_some());
     }
 
     fn get_random_in_range<RNG: RngCore>(&self, rng: &mut RNG) -> usize {
@@ -120,11 +129,8 @@ impl<R: DynamicChannelRegion> RegionHandler for DynamicChannelPlan<R> {
                     let index = R::NUM_JOIN_CHANNELS as usize + n;
                     let value = freq.hz();
                     // unused channels are set to 0
-                    if value == 0 {
-                        self.channels[index] = None;
-                    } else {
-                        self.channels[index] = Some(Channel::new(value, DR::_0, DR::_5));
-                    }
+                    let channel = (value != 0).then(|| Channel::new(value, DR::_0, DR::_5));
+                    self.set_channel(index, channel);
                 }
             }
             // Type 1
@@ -199,8 +205,7 @@ impl<R: DynamicChannelRegion> RegionHandler for DynamicChannelPlan<R> {
     /// NewChannelReq are kept as they are, as required by the ADR
     /// backoff procedure.
     fn enable_default_channels(&mut self) {
-        let mut default = [None; NUM_CHANNELS_DYNAMIC as usize];
-        R::init_channels(&mut default);
+        let default = Self::default_channels();
         for (i, channel) in default.iter().enumerate() {
             if channel.is_some() {
                 self.channel_mask.set_channel(i, true);
@@ -318,8 +323,7 @@ impl<R: DynamicChannelRegion> RegionHandler for DynamicChannelPlan<R> {
         }
         // Disable channel if frequency is 0
         if freq == 0 {
-            self.channels[index as usize] = None;
-            self.channel_mask.set_channel(index as usize, false);
+            self.set_channel(index as usize, None);
             return (true, true);
         }
         let freq_valid = self.frequency_valid(freq);
@@ -334,8 +338,7 @@ impl<R: DynamicChannelRegion> RegionHandler for DynamicChannelPlan<R> {
                     .all(|c| (R::datarates()[c as usize]).is_some());
 
             if freq_valid && dr_supported {
-                self.channels[index as usize] = Some(Channel::new_with_dr(freq, r));
-                self.channel_mask.set_channel(index as usize, true);
+                self.set_channel(index as usize, Some(Channel::new_with_dr(freq, r)));
             }
             return (freq_valid, dr_supported);
         }
@@ -355,10 +358,30 @@ impl<R: DynamicChannelRegion> RegionHandler for DynamicChannelPlan<R> {
 mod tests {
     use super::*;
     use crate::region::{Configuration, Region};
+    use lorawan::parser::Frequency;
 
     // A valid EU868 channel frequency (863..=870 MHz), used to reach the indexing paths.
     const VALID_FREQ: u32 = 868_100_000;
     const VALID_INDEX: u8 = 5;
+
+    #[test]
+    fn cf_list_enables_channel_mask_bit() {
+        let mut config = Configuration::new(Region::EU868);
+        let mut mask = config.channel_mask_get();
+        mask.set_channel(3, false);
+        config.channel_mask_set(mask);
+
+        // CFList type 0: five additional channel frequencies.
+        config.process_join_accept(Some(&CfList::DynamicChannel([
+            Frequency::from_hz(867_700_000),
+            Frequency::from_hz(0),
+            Frequency::from_hz(0),
+            Frequency::from_hz(0),
+            Frequency::from_hz(0),
+        ])));
+
+        assert!(config.channel_mask_get().is_enabled(3).unwrap(), "CFList channel must be enabled");
+    }
 
     // NewChannelReq carries a raw u8 channel index. Indices beyond the channel plan
     // (NUM_CHANNELS_DYNAMIC) must be rejected, not used to index self.channels.
@@ -414,6 +437,44 @@ mod tests {
         let dr = Some(DataRateRange::new_range(DR::_0, DR::_5));
         let mut config = Configuration::new(Region::EU868);
         assert_eq!(config.handle_new_channel(VALID_INDEX, VALID_FREQ, dr), (true, true));
+    }
+
+    // The region's default channels come back without changing a
+    // dynamically configured channel.
+    #[test]
+    fn enable_default_channels_keeps_dynamic_channel_configuration() {
+        let mut config = Configuration::new(Region::EU868);
+        let dr = Some(DataRateRange::new_range(DR::_0, DR::_5));
+        assert_eq!(config.handle_new_channel(VALID_INDEX, VALID_FREQ, dr), (true, true));
+
+        let before = match &config.state {
+            crate::region::State::EU868(plan) => {
+                let channel = plan.channels[VALID_INDEX as usize].unwrap();
+                (channel.frequency, channel._datarates, channel.dl_frequency)
+            }
+            _ => unreachable!(),
+        };
+        assert!(config.channel_mask_get().is_enabled(VALID_INDEX as usize).unwrap());
+
+        let mut mask = config.channel_mask_get();
+        mask.set_channel(0, false);
+        mask.set_channel(1, false);
+        config.channel_mask_set(mask);
+
+        config.enable_default_channels();
+
+        let after = match &config.state {
+            crate::region::State::EU868(plan) => {
+                let channel = plan.channels[VALID_INDEX as usize].unwrap();
+                (channel.frequency, channel._datarates, channel.dl_frequency)
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(after, before);
+        let mask = config.channel_mask_get();
+        assert!(mask.is_enabled(0).unwrap());
+        assert!(mask.is_enabled(1).unwrap());
+        assert!(mask.is_enabled(VALID_INDEX as usize).unwrap());
     }
 
     // The region's default channels come back; a channel added with
